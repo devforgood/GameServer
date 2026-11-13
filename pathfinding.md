@@ -262,7 +262,7 @@ loop:
 | `PathfindingRadius` | `CharData.PathfindingCollisionRadius`, 없으면 40 | A\* 의 `CastCircle` 반지름, 지형 탈출, 대시 정지 거리, 유닛 밀어내기 거리 |
 | `CollisionRadius` | 생성자 인자 → `CharData.GameplayCollisionRadius` → 40 | 오브젝트 간 겹침 판정, QuadTree 바운드, 평타 사거리 보정 |
 
-겹침은 `CollisionRadius` 로 검출하고, 밀어내는 거리는 `PathfindingRadius` 로 계산합니다. 두 값이 다르면 밀어낸 뒤에도 여전히 겹친 상태로 판정되거나 필요 이상으로 밀려날 수 있습니다.
+겹침은 `CollisionRadius` 로 검출하고, 밀어내는 거리는 `PathfindingRadius` 로 계산합니다. 미니언(48 / 35.74)의 경우 거리가 72.5~96이면 충돌로 판정되지만 탈출점이 상대 쪽에 있어 **오히려 서로 끌려갑니다**. 자세한 분석과 대안 비교는 [collision-avoidance.md](collision-avoidance.md) 를 보세요.
 
 ---
 
@@ -272,7 +272,7 @@ loop:
 |---|---|---|
 | 1 | **`PathingHandler.Update` 의 3초 주기 경로 재검증이 사실상 죽은 코드.** `AddPathfinder` 를 호출하는 곳이 없어 `_pathfinders` 가 항상 비어 있음 | [PathingHandler.cs:27](GameServerLib/Handlers/PathingHandler.cs#L27) |
 | 2 | 경로 계산이 동적 장애물(유닛)을 무시. `PathingHandler.IsWalkable(checkObjects)` 옵션이 있지만 기본값 false이고 호출 측에서 켜지 않음 | [PathingHandler.cs:102](GameServerLib/Handlers/PathingHandler.cs#L102) |
-| 3 | 속도 기반 충돌 회피(RVO 등) 없음. 겹침 후 위치 보정만 함 | 5장 |
+| 3 | 속도 기반 충돌 회피(RVO 등) 없음. 겹침 후 위치 보정만 함. 대안 비교: [collision-avoidance.md](collision-avoidance.md) | 5장 |
 | 4 | 지형 충돌 검사가 중심점 하나만 봄 → 몸체 일부가 벽에 들어가도 감지 못함 | [CollisionHandler.cs:141](GameServerLib/Handlers/CollisionHandler.cs#L141) |
 | 5 | 빠른 오브젝트가 한 틱에 상대를 통과하는 터널링 미처리 (코드 TODO) | [CollisionHandler.cs:149](GameServerLib/Handlers/CollisionHandler.cs#L149) |
 | 6 | 추적 중 `RefreshWaypoints` 가 매 틱 A\* 실행 → 쫓는 유닛이 많으면 비용 증가 | [ObjAIBase.cs:661](GameServerLib/GameObjects/AttackableUnits/AI/ObjAIBase.cs#L661) |

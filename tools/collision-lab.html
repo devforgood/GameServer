@@ -159,6 +159,8 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
       <li><b>반경 통일</b>: 서버 원본과 같지만 감지도 <code>PathfindingRadius</code>로 합니다. 끌어당김은 사라지지만 여전히 순간이동으로 보정합니다.</li>
       <li><b>부드러운 밀어내기</b>: 겹친 깊이의 일부(틱당 15%)만 밀어냅니다. 가장 적게 고쳐서 떨림을 줄이는 방법입니다.</li>
       <li><b>ORCA</b>: 위치를 고치지 않고 속도를 고릅니다. 이웃(최대 10, 반경 400)마다 반평면 제약을 만들고 선형계획으로 원하는 속도에 가장 가까운 안전 속도를 구합니다. 벽은 RVO2 다각형 장애물로 넣었습니다. "정지 유닛은 비키지 않음"을 켜면 경로가 없는 유닛은 고정 장애물이 되고, 움직이는 쪽이 회피를 100% 맡습니다.</li>
+      <li><b>A* 재경로</b>: Riot Swarm 글에 나온 LoL 방식을 흉내 낸 것입니다("Along each path explored, collisions are checked with other minions", "each unit receives its path in the form of waypoints"). 25유닛 격자 A*에 주변 유닛을 장애물로 넣고(정지 유닛은 600 이내 전부, 이동 유닛은 250 이내에서 나보다 목표에 더 가까운 유닛만. 서로를 기다리는 교착을 막는 우선순위 규칙), 경로를 줄인 뒤 웨이포인트로 따라갑니다. 앞길이 막히거나 0.5초간 진척이 없으면 다시 계산합니다(최소 0.2초 간격). 목표가 막혀 있으면 가장 가까운 빈 칸으로 갑니다. 남는 겹침은 부드러운 밀어내기로 처리합니다.</li>
+      <li><b>초당 이동 패킷</b>은 클라이언트에 웨이포인트를 다시 보내야 하는 횟수입니다. 위치 보정(<code>SetPosition</code>은 <code>_movementUpdated</code>를 켬)과 새 경로를 셉니다. ORCA는 속도 방향이 10° 이상 또는 속력이 20% 이상 바뀔 때 최소 100ms 간격으로 보낸다고 가정한 <b>추정치</b>입니다.</li>
       <li><b>틱 처리 시간</b>은 이 브라우저에서 JS로 잰 값입니다. 서버(C#) 성능의 대략적인 상대 비교로만 보세요.</li>
     </ul>
   </section>
@@ -415,12 +417,106 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
     return { x, y };
   };
   function setWalls(rects) {
-    walls = new Uint8Array(GW * GH); wallRects = rects; obstacles = [];
+    walls = new Uint8Array(GW * GH); wallRects = rects; obstacles = []; terrainCache.clear();
     for (const [cx0, cy0, cx1, cy1] of rects) {
       for (let gy = cy0; gy < cy1; gy++) for (let gx = cx0; gx < cx1; gx++) walls[gy * GW + gx] = 1;
       const x0 = cx0 * CELL, y0 = cy0 * CELL, x1 = cx1 * CELL, y1 = cy1 * CELL;
       makeObstacle([V(x0, y0), V(x1, y0), V(x1, y1), V(x0, y1)], obstacles);
     }
+  }
+
+  // ---------- unit-aware A* (LoL style: plan around units, resend waypoints when blocked) ----------
+  const ACELL = 25, AGW = W / ACELL, AGH = H / ACELL;
+  const SENSE_IDLE = 600, SENSE_MOVING = 250, REPLAN_MIN = 0.2, REPLAN_WAIT = 0.3, ASTAR_MAX_EXPAND = 5000;
+  const NB8 = [[1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1], [1, 1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [-1, -1, Math.SQRT2]];
+  const terrainCache = new Map();
+  function terrainFree(r) {
+    const key = r.toFixed(2);
+    let g = terrainCache.get(key);
+    if (!g) {
+      g = new Uint8Array(AGW * AGH);
+      for (let y = 0; y < AGH; y++) for (let x = 0; x < AGW; x++) g[y * AGW + x] = isWalkable(x * ACELL + ACELL / 2, y * ACELL + ACELL / 2, r) ? 1 : 0;
+      terrainCache.set(key, g);
+    }
+    return g;
+  }
+  function makeBlocker(u, others, r) {
+    const tf = terrainFree(r);
+    // units we already overlap are ignored so the path can leave them (soft push separates us)
+    const obs = others.map(o => ({ x: o.x, y: o.y, rr: (o.pathR + r + 2) ** 2 })).filter(o => (o.x - u.x) ** 2 + (o.y - u.y) ** 2 > o.rr);
+    const hitUnit = (x, y) => { for (const o of obs) if ((o.x - x) ** 2 + (o.y - y) ** 2 < o.rr) return true; return false; };
+    return {
+      pointBlocked: (x, y) => !isWalkable(x, y, r) || hitUnit(x, y),
+      cellBlocked: (cx, cy) => cx < 0 || cy < 0 || cx >= AGW || cy >= AGH || !tf[cy * AGW + cx] || hitUnit(cx * ACELL + ACELL / 2, cy * ACELL + ACELL / 2),
+    };
+  }
+  function los(a, b, pb) {
+    const d = Math.hypot(b.x - a.x, b.y - a.y), n = Math.max(1, Math.ceil(d / 10));
+    for (let i = 1; i <= n; i++) { const t = i / n; if (pb(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) return false; }
+    return true;
+  }
+  // returns { path: [points after start], reached: bool, moved: bool } or null if no cell is reachable
+  function astar(start, goal, blk, stat) {
+    stat.astar++;
+    const cl = (v, n) => Math.max(0, Math.min(n - 1, v));
+    const sx = cl(Math.floor(start.x / ACELL), AGW), sy = cl(Math.floor(start.y / ACELL), AGH);
+    let gx = cl(Math.floor(goal.x / ACELL), AGW), gy = cl(Math.floor(goal.y / ACELL), AGH);
+    let exactGoal = !blk.pointBlocked(goal.x, goal.y);
+    if (blk.cellBlocked(gx, gy)) {
+      let found = null;
+      for (let ring = 1; ring < 16 && !found; ring++) {
+        let bd = Infinity;
+        for (let dy = -ring; dy <= ring; dy++) for (let dx = -ring; dx <= ring; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring || blk.cellBlocked(gx + dx, gy + dy)) continue;
+          const d = dx * dx + dy * dy; if (d < bd) { bd = d; found = [gx + dx, gy + dy]; }
+        }
+      }
+      if (!found) return null;
+      [gx, gy] = found; exactGoal = false;
+    }
+    const N = AGW * AGH, gScore = new Float32Array(N).fill(Infinity), came = new Int32Array(N).fill(-1), closed = new Uint8Array(N);
+    const heap = [];
+    const push = (f, i) => { heap.push([f, i]); let k = heap.length - 1; while (k > 0) { const p = (k - 1) >> 1; if (heap[p][0] <= heap[k][0]) break; [heap[p], heap[k]] = [heap[k], heap[p]]; k = p; } };
+    const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let k = 0; for (;;) { const l = 2 * k + 1, r = l + 1; let m = k;
+      if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === k) break; [heap[m], heap[k]] = [heap[k], heap[m]]; k = m; } } return top; };
+    const h = (cx, cy) => { const dx = Math.abs(cx - gx), dy = Math.abs(cy - gy); return dx + dy + (Math.SQRT2 - 2) * Math.min(dx, dy); };
+    const s = sy * AGW + sx, gi = gy * AGW + gx;
+    gScore[s] = 0; push(h(sx, sy), s);
+    let best = s, bestH = h(sx, sy), expand = 0;
+    while (heap.length) {
+      const [, i] = pop();
+      if (closed[i]) continue;
+      closed[i] = 1;
+      if (i === gi) { best = i; bestH = 0; break; }
+      if (++expand > ASTAR_MAX_EXPAND) break;
+      const cx = i % AGW, cy = (i / AGW) | 0, hh = h(cx, cy);
+      if (hh < bestH) { bestH = hh; best = i; }
+      for (const [dx, dy, c] of NB8) {
+        const nx = cx + dx, ny = cy + dy;
+        if (blk.cellBlocked(nx, ny)) continue;
+        if (dx && dy && (blk.cellBlocked(cx + dx, cy) || blk.cellBlocked(cx, cy + dy))) continue;
+        const ni = ny * AGW + nx;
+        if (closed[ni]) continue;
+        const ng = gScore[i] + c;
+        if (ng < gScore[ni]) { gScore[ni] = ng; came[ni] = i; push(ng + h(nx, ny), ni); }
+      }
+    }
+    stat.expand += expand;
+    const reached = best === gi;
+    const pts = [V(start.x, start.y)], cells = [];
+    for (let i = best; i !== s && i >= 0; i = came[i]) cells.push(i);
+    cells.reverse();
+    for (const i of cells) pts.push(V((i % AGW) * ACELL + ACELL / 2, ((i / AGW) | 0) * ACELL + ACELL / 2));
+    if (reached && exactGoal) pts.push(V(goal.x, goal.y));
+    // string pulling: keep the farthest point still in line of sight
+    const out = [];
+    let a = 0;
+    while (a < pts.length - 1) {
+      let b = a + 1;
+      while (b + 1 < pts.length && los(pts[a], pts[b + 1], blk.pointBlocked)) b++;
+      out.push(pts[b]); a = b;
+    }
+    return { path: out, reached, moved: out.length > 0 };
   }
 
   // ---------- scenarios (shared spec for both maps) ----------
@@ -468,10 +564,12 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
     unified: { label: "반경 통일", hint: "감지도 PathfindingRadius로 맞춘 버전. 끌어당김은 없지만 여전히 순간이동합니다." },
     soft: { label: "부드러운 밀어내기", hint: "겹친 깊이의 15%만 매 틱 밀어냅니다. 위치 보정 방식을 유지하면서 떨림을 줄이는 최소 수정안." },
     orca: { label: "ORCA", hint: "RVO2 ORCA로 속도를 골라 미리 피합니다. 위치를 직접 고치는 것은 유닛 중심이 벽에 들어간 경우뿐입니다." },
+    astar: { label: "A* 재경로", hint: "LoL 방식에 가깝게: 주변 유닛을 장애물로 넣은 A*로 경로를 짜고, 막히거나 정체되면 다시 계산해 웨이포인트를 보냅니다. 남는 겹침은 부드러운 밀어내기." },
     off: { label: "끄기", hint: "유닛끼리 충돌을 처리하지 않습니다. 지형 충돌만 남습니다." },
   };
 
   let selectedId = null, marker = null;
+  const newStat = n => ({ tests: 0, pushes: 0, pulls: 0, teleSum: 0, terrain: 0, lp3: 0, orcaInside: 0, packets: 0, astar: 0, expand: 0, replans: 0, n });
 
   // ---------- one map ----------
   class Sim {
@@ -490,17 +588,63 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
       this.el.querySelectorAll(".modes button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.m === m)));
       this.$hint.textContent = MODES[m].hint;
       this.tree = buildTree(this.units || [], u => this.detectR(u)); this.hist = [];
+      if (this.units) this.planAll();
     }
     detectR(u) { return this.mode === "server" ? u.collR : u.pathR; }
     load(spec) {
       this.units = spec.map((s, i) => this.mk(s, i + 1));
-      this.tick = 0; this.hist = [];
+      this.tick = 0; this.time = 0; this.hist = [];
       this.tree = buildTree(this.units, u => this.detectR(u));
+      this.planAll();
     }
     mk(s, id) {
       const t = TYPES[s.type];
-      return { id, type: s.type, team: s.team, x: s.x, y: s.y, collR: t.collR, pathR: t.pathR, speed: t.speed, path: s.path.map(p => ({ ...p })),
-        vx: 0, vy: 0, pushX: 0, pushY: 0, pull: false, stuck: false, lastGoal: null, node: null, cands: null };
+      const goal = s.path.length ? { ...s.path[s.path.length - 1] } : null;
+      return { id, type: s.type, team: s.team, x: s.x, y: s.y, collR: t.collR, pathR: t.pathR, speed: t.speed, path: s.path.map(p => ({ ...p })), goal,
+        vx: 0, vy: 0, pushX: 0, pushY: 0, pull: false, stuck: false, lastGoal: null, node: null, cands: null,
+        lastPlan: -9, waiting: false, chkX: s.x, chkY: s.y, sentT: -9, sentDir: null, sentSp: 0, sentMoving: false };
+    }
+    target(u) { return this.mode === "astar" ? u.goal : (u.path.length ? u.path[u.path.length - 1] : null); }
+    planAll() {
+      if (this.mode !== "astar") return;
+      const s = newStat(this.units.length);
+      for (const u of this.units) if (u.goal) this.plan(u, s);
+    }
+    // idle units always block; a moving unit only yields to movers that are ahead of it (closer to their own goal),
+    // so two movers never wait for each other (that deadlocked the choke point)
+    blocks(u, o) {
+      const d2 = (o.x - u.x) ** 2 + (o.y - u.y) ** 2;
+      if (!o.goal) return d2 < SENSE_IDLE ** 2;
+      if (d2 >= SENSE_MOVING ** 2) return false;
+      const ro = Math.hypot(o.goal.x - o.x, o.goal.y - o.y), ru = Math.hypot(u.goal.x - u.x, u.goal.y - u.y);
+      return ro < ru || (ro === ru && o.id < u.id);
+    }
+    plan(u, s) {
+      if (!u.goal) return;
+      const others = this.units.filter(o => o !== u && this.blocks(u, o));
+      const res = astar(V(u.x, u.y), u.goal, makeBlocker(u, others, u.pathR), s);
+      u.lastPlan = this.time;
+      if (!res || !res.moved) {
+        // cannot get any closer: close enough counts as arrived, otherwise wait and retry
+        if (Math.hypot(u.goal.x - u.x, u.goal.y - u.y) < 300 || (res && res.reached)) u.goal = null;
+        else u.waiting = true;
+        if (u.path.length) { u.path = []; s.packets++; }
+        return;
+      }
+      u.waiting = false;
+      u.path = res.path.map(p => ({ x: p.x, y: p.y }));
+      s.packets++;
+    }
+    segmentBlocked(u) {
+      let from = V(u.x, u.y), left = 250;
+      const near = this.units.filter(o => o !== u && (o.x - u.x) ** 2 + (o.y - u.y) ** 2 < 300 * 300 && Math.hypot(o.x - u.x, o.y - u.y) > o.pathR + u.pathR && this.blocks(u, o));
+      for (const p of u.path) {
+        const seg = sub(p, from), len = abs(seg);
+        const to = len > left ? add(from, mul(left / len, seg)) : p;
+        for (const o of near) if (distSqPointSeg(from, to, V(o.x, o.y)) < (o.pathR + u.pathR - 2) ** 2) return true;
+        left -= len; if (left <= 0) break; from = p;
+      }
+      return false;
     }
     prefVelocity(u) {
       if (!u.path.length) return V(0, 0);
@@ -518,8 +662,8 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
     }
     step() {
       const t0 = performance.now();
-      this.tick++;
-      const s = { tests: 0, pushes: 0, pulls: 0, teleSum: 0, terrain: 0, lp3: 0, orcaInside: 0, n: this.units.length };
+      this.tick++; this.time = this.tick * DT;
+      const s = newStat(this.units.length);
       for (const u of this.units) { u.pushX = 0; u.pushY = 0; u.pull = false; u.cands = null; u.px = u.x; u.py = u.y; }
 
       // Map.Update -> CollisionHandler.Update (terrain + unit collision), then UpdateQuadTree
@@ -540,7 +684,7 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
           let d = Math.sqrt(d2), ux, uy;
           if (d < 1e-6) { const a = rng() * Math.PI * 2; ux = Math.cos(a); uy = Math.sin(a); d = 0; } else { ux = dx / d; uy = dy / d; }
           let ex, ey;
-          if (this.mode === "soft") {
+          if (this.mode === "soft" || this.mode === "astar") {
             const pen = u.pathR + o.pathR - d;
             ex = u.x - ux * pen * 0.15; ey = u.y - uy * pen * 0.15;
             if (!isWalkable(ex, ey, 0)) continue;
@@ -553,6 +697,23 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
           const mx = ex - u.x, my = ey - u.y;
           s.pushes++; s.teleSum += Math.hypot(mx, my);
           u.pushX += mx; u.pushY += my; u.x = ex; u.y = ey;
+        }
+      }
+      // every SetPosition marks _movementUpdated -> movement packet next sync
+      for (const u of this.units) if (Math.abs(u.pushX) + Math.abs(u.pushY) > 0.01) s.packets++;
+
+      if (this.mode === "astar") {
+        for (const u of this.units) {
+          if (!u.goal) continue;
+          const since = this.time - u.lastPlan;
+          if (since < (u.waiting ? REPLAN_WAIT : REPLAN_MIN)) continue;
+          let need = !u.path.length;
+          if (!need && (this.tick + u.id) % 6 === 0) need = this.segmentBlocked(u);
+          if (!need && (this.tick + u.id) % 30 === 0) {
+            need = Math.hypot(u.x - u.chkX, u.y - u.chkY) < u.speed * 0.5 * 0.25;
+            u.chkX = u.x; u.chkY = u.y;
+          }
+          if (need) { s.replans++; this.plan(u, s); }
         }
       }
 
@@ -608,11 +769,26 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
           }
         }
         if (this.mode !== "orca") { u.vx = (u.x - bx) / DT; u.vy = (u.y - by) / DT; }
+        if (this.mode === "astar" && u.goal && !u.path.length && Math.hypot(u.goal.x - u.x, u.goal.y - u.y) < 2) u.goal = null;
+      }
+
+      if (this.mode === "orca") {
+        // estimate: resend waypoints when heading turns > 10 deg or speed changes > 20 %, at most every 100 ms
+        for (const u of this.units) {
+          const sp = Math.hypot(u.vx, u.vy), moving = sp > 5;
+          let need = moving !== u.sentMoving;
+          if (!need && moving) {
+            const cos = (u.vx * u.sentDir[0] + u.vy * u.sentDir[1]) / (sp * Math.hypot(u.sentDir[0], u.sentDir[1]));
+            need = cos < Math.cos(10 * Math.PI / 180) || Math.abs(sp - u.sentSp) > 0.2 * u.speed;
+          }
+          if (need && this.time - u.sentT >= 0.1) { s.packets++; u.sentT = this.time; u.sentDir = [u.vx, u.vy]; u.sentSp = sp; u.sentMoving = moving; }
+        }
       }
 
       if (this.tick % 60 === 0) for (const u of this.units) {
-        if (!u.path.length) { u.stuck = false; u.lastGoal = null; continue; }
-        const g = u.path[u.path.length - 1], cur = Math.hypot(g.x - u.x, g.y - u.y);
+        const g = this.target(u);
+        if (!g) { u.stuck = false; u.lastGoal = null; continue; }
+        const cur = Math.hypot(g.x - u.x, g.y - u.y);
         if (u.lastGoal !== null) u.stuck = (u.lastGoal - cur) < u.speed * 0.25;
         u.lastGoal = cur;
       }
@@ -620,7 +796,7 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
       let overlaps = 0, maxDepth = 0, moving = 0, speedRatio = 0;
       for (let i = 0; i < this.units.length; i++) {
         const a = this.units[i];
-        if (a.path.length) { moving++; speedRatio += Math.hypot(a.x - a.px, a.y - a.py) / (a.speed * DT); }
+        if (this.target(a)) { moving++; speedRatio += Math.hypot(a.x - a.px, a.y - a.py) / (a.speed * DT); }
         for (let j = i + 1; j < this.units.length; j++) {
           const b = this.units[j], pen = a.pathR + b.pathR - Math.hypot(a.x - b.x, a.y - b.y);
           if (pen > 0.5) { overlaps++; if (pen > maxDepth) maxDepth = pen; }
@@ -663,6 +839,11 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
         ctx.fillStyle = c.sel; ctx.globalAlpha = 0.08; ctx.beginPath(); ctx.arc(sel.x, sel.y, r, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
         if (sel.node) { ctx.strokeStyle = c.sel; ctx.lineWidth = 2 / sc; ctx.strokeRect(sel.node.x, sel.node.y, sel.node.w, sel.node.h); }
         if (sel.cands) { ctx.strokeStyle = c.sel; ctx.lineWidth = 1.2 / sc; for (const o of sel.cands) if (o !== sel) { ctx.beginPath(); ctx.moveTo(sel.x, sel.y); ctx.lineTo(o.x, o.y); ctx.stroke(); } }
+        if (sel.path.length) {
+          ctx.strokeStyle = c.sel; ctx.lineWidth = 2.5 / sc; ctx.setLineDash([10 / sc, 6 / sc]);
+          ctx.beginPath(); ctx.moveTo(sel.x, sel.y); for (const p of sel.path) ctx.lineTo(p.x, p.y); ctx.stroke(); ctx.setLineDash([]);
+          ctx.fillStyle = c.sel; for (const p of sel.path) { ctx.beginPath(); ctx.arc(p.x, p.y, 6 / sc, 0, Math.PI * 2); ctx.fill(); }
+        }
       }
       for (const u of this.units) {
         const col = u.team === "blue" ? c.blue : c.red;
@@ -693,8 +874,10 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
       const last = h[h.length - 1] || { n: this.units.length, overlaps: 0, maxDepth: 0, stuck: 0, moving: 0 };
       const tele = avg(s => s.teleSum) / Math.max(1, last.n), pulls = h.reduce((a, s) => a + s.pulls, 0);
       const ratio = avg(s => s.speedRatio) * 100, ms = avg(s => s.ms);
+      const sum = f => h.reduce((a, s) => a + f(s), 0), packets = sum(s => s.packets);
       const rows = [
         ["틱 처리 시간", ms.toFixed(3) + " ms", ""],
+        [this.mode === "orca" ? "초당 이동 패킷 (추정)" : "초당 이동 패킷", packets, packets > last.n * 5 ? "bad" : packets > last.n ? "warn" : "good"],
         ["틱당 거리 검사", avg(s => s.tests).toFixed(0), ""],
         ["유닛당 틱 순간이동", tele.toFixed(2), tele > 1.5 ? "bad" : tele > 0.3 ? "warn" : "good"],
         ["초당 끌어당김", pulls, pulls ? "bad" : ""],
@@ -703,12 +886,13 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
         ["이동 중 속도 효율", last.moving ? ratio.toFixed(0) + "%" : "-", ""],
         ["정체 유닛", last.stuck + " / " + last.moving, last.stuck ? "warn" : ""],
       ];
+      if (this.mode === "astar") { const calls = sum(s => s.astar); rows.push(["초당 A* 탐색", calls, ""], ["A* 1회 평균 확장 노드", calls ? (sum(s => s.expand) / calls).toFixed(0) : "-", ""]); }
       if (this.mode === "orca") rows.push(["LP3 대체 해 (초당)", h.reduce((a, s) => a + s.lp3, 0), ""], ["겹친 상태 ORCA 계산 (초당)", h.reduce((a, s) => a + s.orcaInside, 0), ""]);
       this.$m.innerHTML = rows.map(([k, v, cl]) => `<div><span>${k}</span><span class="${cl}">${v}</span></div>`).join("");
     }
   }
 
-  const sims = [new Sim(document.getElementById("simA"), "server"), new Sim(document.getElementById("simB"), "orca")];
+  const sims = [new Sim(document.getElementById("simA"), "orca"), new Sim(document.getElementById("simB"), "astar")];
   let scenario = "crowd", extraSpecs = [];
 
   function reset() {
@@ -723,7 +907,13 @@ canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; bord
     const hit = sim.units.find(u => Math.hypot(u.x - x, u.y - y) < u.pathR + 10 / sim.scale);
     if (hit) { selectedId = selectedId === hit.id ? null : hit.id; return; }
     marker = { x, y, t: performance.now() };
-    for (const s of sims) for (const u of s.units) if (selectedId === null || u.id === selectedId) { u.path = [{ x, y }]; u.lastGoal = null; u.stuck = false; }
+    for (const s of sims) {
+      const st = newStat(s.units.length);
+      for (const u of s.units) if (selectedId === null || u.id === selectedId) {
+        u.path = [{ x, y }]; u.goal = { x, y }; u.lastGoal = null; u.stuck = false; u.waiting = false;
+        if (s.mode === "astar") s.plan(u, st);
+      }
+    }
   }
 
   // ---------- controls ----------
