@@ -1,0 +1,774 @@
+<title>유닛 충돌 시뮬레이터</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: 상단 공통 조작 바, 그 아래 같은 시나리오를 서로 다른 방식으로 돌리는 두 맵을 나란히 (좁으면 위아래) */
+:root {
+  --bg: #eef1f3;
+  --panel: #ffffff;
+  --fg: #17212b;
+  --muted: #5d6b78;
+  --line: #d3dae0;
+  --ground: #dfe6e2;
+  --wall: #8c9a92;
+  --blue: #2f6fd6;
+  --red: #c9474d;
+  --accent: #d98a1c;
+  --pull: #8a4fd1;
+  --vel: #0f9d8a;
+  --quad: rgba(23, 33, 43, 0.2);
+  --sel: #0f9d8a;
+  --font-ui: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11171c; --panel: #182128; --fg: #e3e9ee; --muted: #93a2ae; --line: #2a3640;
+    --ground: #1c2a27; --wall: #4a5a55; --blue: #5b93f0; --red: #e46a6f; --accent: #f0a63a;
+    --pull: #b083f0; --vel: #31c4ae; --quad: rgba(227, 233, 238, 0.18); --sel: #31c4ae; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11171c; --panel: #182128; --fg: #e3e9ee; --muted: #93a2ae; --line: #2a3640;
+  --ground: #1c2a27; --wall: #4a5a55; --blue: #5b93f0; --red: #e46a6f; --accent: #f0a63a;
+  --pull: #b083f0; --vel: #31c4ae; --quad: rgba(227, 233, 238, 0.18); --sel: #31c4ae; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 32px;
+}
+.wrap { max-width: 1440px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+header h1 { font-size: 22px; font-weight: 600; margin: 0; text-wrap: balance; }
+header p { margin: 4px 0 0; color: var(--muted); max-width: 80ch; }
+code, .mono { font-family: var(--font-mono); font-size: 12.5px; }
+.bar { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; }
+.group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.label { font-size: 11.5px; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+button, select { font: inherit; font-size: 13px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button[aria-pressed="true"] { background: var(--fg); color: var(--panel); border-color: var(--fg); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--sel); outline-offset: 2px; }
+.checks { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.checks label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+input[type="range"] { width: 120px; accent-color: var(--sel); }
+.sims { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 960px) { .sims { grid-template-columns: minmax(0, 1fr); } }
+.sim { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.simhead { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; }
+.simhead .modes { display: flex; flex-wrap: wrap; gap: 4px; }
+.simhead .modes button { padding: 4px 8px; font-size: 12.5px; }
+.modehint { font-size: 12.5px; color: var(--muted); min-height: 2.6em; }
+canvas { width: 100%; max-width: 100%; aspect-ratio: 3 / 2; display: block; border-radius: 6px; border: 1px solid var(--line); background: var(--ground); touch-action: none; cursor: crosshair; }
+.metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 18px; font-size: 12.5px; }
+@media (max-width: 480px) { .metrics { grid-template-columns: minmax(0, 1fr); } }
+.metrics div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dotted var(--line); padding-block: 2px; }
+.metrics span:first-child { color: var(--muted); }
+.metrics span:last-child { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.metrics .warn { color: var(--accent); font-weight: 600; }
+.metrics .bad { color: var(--red); font-weight: 600; }
+.metrics .good { color: var(--vel); font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 12.5px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.sw.ring { background: transparent; border: 1.5px dashed var(--muted); }
+.sw.bar { border-radius: 2px; height: 3px; width: 16px; }
+.hint { font-size: 12.5px; color: var(--muted); }
+.notes { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+.notes h2 { font-size: 16px; margin: 0 0 8px; font-weight: 600; }
+.notes ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; max-width: 100ch; }
+.notes li b { font-weight: 600; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>유닛 충돌 시뮬레이터</h1>
+    <p>같은 시나리오를 두 맵에서 서로 다른 충돌 처리 방식으로 동시에 돌려 비교합니다. "서버 원본"은 LeagueSandbox <code>CollisionHandler</code>를, "ORCA"는 RVO2-CS <code>Agent.ComputeNewVelocity</code>를 그대로 옮겼습니다. 틱은 60Hz, 좌표는 게임 유닛입니다.</p>
+  </header>
+
+  <div class="bar">
+    <div class="group">
+      <div class="label">시나리오</div>
+      <div class="row" id="scen">
+        <button data-s="crowd" aria-pressed="true">한 점으로 집결</button>
+        <button data-s="waves">웨이브 정면 충돌</button>
+        <button data-s="choke">좁은 통로</button>
+        <button data-s="idle">정지한 미니언 무리</button>
+      </div>
+    </div>
+    <div class="group">
+      <div class="label">실행</div>
+      <div class="row">
+        <button id="play" aria-pressed="true">일시정지</button>
+        <button id="step">1틱</button>
+        <button id="reset">다시 시작</button>
+        <button id="add">미니언 +5</button>
+        <select id="speed" aria-label="재생 속도">
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+        </select>
+      </div>
+    </div>
+    <div class="group">
+      <div class="label">ORCA 설정</div>
+      <div class="row">
+        <label class="hint" for="th">시간 지평 <b id="thv" class="mono">1.00s</b></label>
+        <input type="range" id="th" min="0.1" max="3" step="0.05" value="1">
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="fixIdle"> 정지 유닛은 비키지 않음</label>
+      </div>
+    </div>
+    <div class="group">
+      <div class="label">표시</div>
+      <div class="checks">
+        <label><input type="checkbox" id="showQuad"> 쿼드트리</label>
+        <label><input type="checkbox" id="showRing" checked> 감지 반경</label>
+        <label><input type="checkbox" id="showPush" checked> 순간이동 벡터</label>
+        <label><input type="checkbox" id="showVel" checked> 속도</label>
+        <label><input type="checkbox" id="showPath"> 경로</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i class="sw" style="background:var(--blue)"></i>블루 팀</span>
+    <span><i class="sw" style="background:var(--red)"></i>레드 팀</span>
+    <span><i class="sw ring"></i>감지 반경</span>
+    <span><i class="sw bar" style="background:var(--accent)"></i>밀려서 순간이동 (×8)</span>
+    <span><i class="sw bar" style="background:var(--pull)"></i>끌려서 순간이동 (×8)</span>
+    <span><i class="sw bar" style="background:var(--vel)"></i>실제 속도 (0.25초 이동량)</span>
+    <span class="hint">유닛을 누르면 양쪽에서 같은 유닛이 선택됩니다. 빈 곳을 누르면 선택한 유닛(없으면 전체)이 그 지점으로 이동합니다.</span>
+  </div>
+
+  <div class="sims">
+    <section class="sim" id="simA"></section>
+    <section class="sim" id="simB"></section>
+  </div>
+
+  <section class="notes">
+    <h2>방식별 동작</h2>
+    <ul>
+      <li><b>서버 원본</b>: 겹침은 <code>CollisionRadius</code>로 감지하고, <code>GetCircleEscapePoint(p1, PathfindingRadius+1, p2, PathfindingRadius)</code> 위치로 즉시 <code>SetPosition</code>합니다(AttackableUnit.cs:312). 감지 반경이 더 커서 72.5~96 거리의 미니언은 서로 끌려갑니다.</li>
+      <li><b>반경 통일</b>: 서버 원본과 같지만 감지도 <code>PathfindingRadius</code>로 합니다. 끌어당김은 사라지지만 여전히 순간이동으로 보정합니다.</li>
+      <li><b>부드러운 밀어내기</b>: 겹친 깊이의 일부(틱당 15%)만 밀어냅니다. 가장 적게 고쳐서 떨림을 줄이는 방법입니다.</li>
+      <li><b>ORCA</b>: 위치를 고치지 않고 속도를 고릅니다. 이웃(최대 10, 반경 400)마다 반평면 제약을 만들고 선형계획으로 원하는 속도에 가장 가까운 안전 속도를 구합니다. 벽은 RVO2 다각형 장애물로 넣었습니다. "정지 유닛은 비키지 않음"을 켜면 경로가 없는 유닛은 고정 장애물이 되고, 움직이는 쪽이 회피를 100% 맡습니다.</li>
+      <li><b>틱 처리 시간</b>은 이 브라우저에서 JS로 잰 값입니다. 서버(C#) 성능의 대략적인 상대 비교로만 보세요.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+(() => {
+  const W = 2400, H = 1600, CELL = 50, GW = W / CELL, GH = H / CELL, DT = 1 / 60;
+  const ORCA_NEIGHBOR_DIST = 400, ORCA_MAX_NEIGHBORS = 10, ORCA_TH_OBST = 0.5, EPS = 0.00001;
+  const opts = { timeHorizon: 1, fixIdle: false };
+
+  // ---------- vector helpers ----------
+  const V = (x, y) => ({ x, y });
+  const add = (a, b) => V(a.x + b.x, a.y + b.y), sub = (a, b) => V(a.x - b.x, a.y - b.y);
+  const mul = (s, a) => V(a.x * s, a.y * s), dot = (a, b) => a.x * b.x + a.y * b.y;
+  const det = (a, b) => a.x * b.y - a.y * b.x, absSq = a => a.x * a.x + a.y * a.y, abs = a => Math.sqrt(absSq(a));
+  const norm = a => { const l = abs(a); return l <= EPS ? V(0, 0) : V(a.x / l, a.y / l); };
+  const leftOf = (a, b, c) => det(sub(a, c), sub(b, a));
+  const distSqPointSeg = (v1, v2, v3) => {
+    const seg = sub(v2, v1), lsq = absSq(seg);
+    if (lsq <= EPS * EPS) return absSq(sub(v3, v1));
+    const r = dot(sub(v3, v1), seg) / lsq;
+    if (r < 0) return absSq(sub(v3, v1));
+    if (r > 1) return absSq(sub(v3, v2));
+    return absSq(sub(v3, add(v1, mul(r, seg))));
+  };
+
+  // ---------- ORCA (port of RVO2-CS Agent.cs, Apache-2.0, (c) 2008 UNC Chapel Hill) ----------
+  function linearProgram1(lines, lineNo, radius, optV, dirOpt, res) {
+    const L = lines[lineNo];
+    const dp = dot(L.point, L.direction);
+    const disc = dp * dp + radius * radius - absSq(L.point);
+    if (disc < 0) return false;
+    const sq = Math.sqrt(disc);
+    let tLeft = -dp - sq, tRight = -dp + sq;
+    for (let i = 0; i < lineNo; i++) {
+      const den = det(L.direction, lines[i].direction);
+      const num = det(lines[i].direction, sub(L.point, lines[i].point));
+      if (Math.abs(den) <= EPS) { if (num < 0) return false; continue; }
+      const t = num / den;
+      if (den >= 0) tRight = Math.min(tRight, t); else tLeft = Math.max(tLeft, t);
+      if (tLeft > tRight) return false;
+    }
+    let p;
+    if (dirOpt) p = dot(optV, L.direction) > 0 ? add(L.point, mul(tRight, L.direction)) : add(L.point, mul(tLeft, L.direction));
+    else {
+      const t = dot(L.direction, sub(optV, L.point));
+      p = add(L.point, mul(t < tLeft ? tLeft : t > tRight ? tRight : t, L.direction));
+    }
+    res.x = p.x; res.y = p.y;
+    return true;
+  }
+  function linearProgram2(lines, radius, optV, dirOpt, res) {
+    let r;
+    if (dirOpt) r = mul(radius, optV);
+    else if (absSq(optV) > radius * radius) r = mul(radius, norm(optV));
+    else r = V(optV.x, optV.y);
+    res.x = r.x; res.y = r.y;
+    for (let i = 0; i < lines.length; i++) {
+      if (det(lines[i].direction, sub(lines[i].point, res)) > 0) {
+        const tx = res.x, ty = res.y;
+        if (!linearProgram1(lines, i, radius, optV, dirOpt, res)) { res.x = tx; res.y = ty; return i; }
+      }
+    }
+    return lines.length;
+  }
+  function linearProgram3(lines, numObst, begin, radius, res) {
+    let distance = 0;
+    for (let i = begin; i < lines.length; i++) {
+      if (det(lines[i].direction, sub(lines[i].point, res)) > distance) {
+        const proj = lines.slice(0, numObst);
+        for (let j = numObst; j < i; j++) {
+          let point;
+          const d = det(lines[i].direction, lines[j].direction);
+          if (Math.abs(d) <= EPS) {
+            if (dot(lines[i].direction, lines[j].direction) > 0) continue;
+            point = mul(0.5, add(lines[i].point, lines[j].point));
+          } else {
+            point = add(lines[i].point, mul(det(lines[j].direction, sub(lines[i].point, lines[j].point)) / d, lines[i].direction));
+          }
+          proj.push({ point, direction: norm(sub(lines[j].direction, lines[i].direction)) });
+        }
+        const tx = res.x, ty = res.y;
+        if (linearProgram2(proj, radius, V(-lines[i].direction.y, lines[i].direction.x), true, res) < proj.length) { res.x = tx; res.y = ty; }
+        distance = det(lines[i].direction, sub(lines[i].point, res));
+      }
+    }
+  }
+
+  // agent: {pos, vel, prefVel, radius, maxSpeed}; neigh: [{a, resp}]; obstNeigh: [obstacle]
+  function computeOrcaVelocity(ag, neigh, obstNeigh, timeHorizon, stat) {
+    const lines = [];
+    const pos = ag.pos, vel = ag.vel, R = ag.radius;
+    const invTHO = 1 / ORCA_TH_OBST;
+    for (const ob of obstNeigh) {
+      let o1 = ob, o2 = ob.next;
+      const rp1 = sub(o1.point, pos), rp2 = sub(o2.point, pos);
+      let covered = false;
+      for (const l of lines) {
+        if (det(sub(mul(invTHO, rp1), l.point), l.direction) - invTHO * R >= -EPS &&
+            det(sub(mul(invTHO, rp2), l.point), l.direction) - invTHO * R >= -EPS) { covered = true; break; }
+      }
+      if (covered) continue;
+      const d1 = absSq(rp1), d2 = absSq(rp2), rSq = R * R;
+      const ov = sub(o2.point, o1.point);
+      const s = dot(mul(-1, rp1), ov) / absSq(ov);
+      const dLine = absSq(sub(mul(-1, rp1), mul(s, ov)));
+      if (s < 0 && d1 <= rSq) { if (o1.convex) lines.push({ point: V(0, 0), direction: norm(V(-rp1.y, rp1.x)) }); continue; }
+      if (s > 1 && d2 <= rSq) { if (o2.convex && det(rp2, o2.direction) >= 0) lines.push({ point: V(0, 0), direction: norm(V(-rp2.y, rp2.x)) }); continue; }
+      if (s >= 0 && s <= 1 && dLine <= rSq) { lines.push({ point: V(0, 0), direction: mul(-1, o1.direction) }); continue; }
+      let leftLeg, rightLeg;
+      if (s < 0 && dLine <= rSq) {
+        if (!o1.convex) continue;
+        o2 = o1;
+        const l1 = Math.sqrt(d1 - rSq);
+        leftLeg = mul(1 / d1, V(rp1.x * l1 - rp1.y * R, rp1.x * R + rp1.y * l1));
+        rightLeg = mul(1 / d1, V(rp1.x * l1 + rp1.y * R, -rp1.x * R + rp1.y * l1));
+      } else if (s > 1 && dLine <= rSq) {
+        if (!o2.convex) continue;
+        o1 = o2;
+        const l2 = Math.sqrt(d2 - rSq);
+        leftLeg = mul(1 / d2, V(rp2.x * l2 - rp2.y * R, rp2.x * R + rp2.y * l2));
+        rightLeg = mul(1 / d2, V(rp2.x * l2 + rp2.y * R, -rp2.x * R + rp2.y * l2));
+      } else {
+        if (o1.convex) { const l1 = Math.sqrt(d1 - rSq); leftLeg = mul(1 / d1, V(rp1.x * l1 - rp1.y * R, rp1.x * R + rp1.y * l1)); }
+        else leftLeg = mul(-1, o1.direction);
+        if (o2.convex) { const l2 = Math.sqrt(d2 - rSq); rightLeg = mul(1 / d2, V(rp2.x * l2 + rp2.y * R, -rp2.x * R + rp2.y * l2)); }
+        else rightLeg = o1.direction;
+      }
+      const leftN = o1.prev;
+      let leftForeign = false, rightForeign = false;
+      if (o1.convex && det(leftLeg, mul(-1, leftN.direction)) >= 0) { leftLeg = mul(-1, leftN.direction); leftForeign = true; }
+      if (o2.convex && det(rightLeg, o2.direction) <= 0) { rightLeg = o2.direction; rightForeign = true; }
+      const lc = mul(invTHO, sub(o1.point, pos)), rc = mul(invTHO, sub(o2.point, pos)), cv = sub(rc, lc);
+      const t = o1 === o2 ? 0.5 : dot(sub(vel, lc), cv) / absSq(cv);
+      const tL = dot(sub(vel, lc), leftLeg), tR = dot(sub(vel, rc), rightLeg);
+      if ((t < 0 && tL < 0) || (o1 === o2 && tL < 0 && tR < 0)) {
+        const uw = norm(sub(vel, lc));
+        lines.push({ direction: V(uw.y, -uw.x), point: add(lc, mul(R * invTHO, uw)) }); continue;
+      } else if (t > 1 && tR < 0) {
+        const uw = norm(sub(vel, rc));
+        lines.push({ direction: V(uw.y, -uw.x), point: add(rc, mul(R * invTHO, uw)) }); continue;
+      }
+      const dC = (t < 0 || t > 1 || o1 === o2) ? Infinity : absSq(sub(vel, add(lc, mul(t, cv))));
+      const dL = tL < 0 ? Infinity : absSq(sub(vel, add(lc, mul(tL, leftLeg))));
+      const dR = tR < 0 ? Infinity : absSq(sub(vel, add(rc, mul(tR, rightLeg))));
+      if (dC <= dL && dC <= dR) {
+        const dir = mul(-1, o1.direction);
+        lines.push({ direction: dir, point: add(lc, mul(R * invTHO, V(-dir.y, dir.x))) }); continue;
+      }
+      if (dL <= dR) {
+        if (leftForeign) continue;
+        lines.push({ direction: leftLeg, point: add(lc, mul(R * invTHO, V(-leftLeg.y, leftLeg.x))) }); continue;
+      }
+      if (rightForeign) continue;
+      const dir = mul(-1, rightLeg);
+      lines.push({ direction: dir, point: add(rc, mul(R * invTHO, V(-dir.y, dir.x))) });
+    }
+    const numObst = lines.length;
+    const invTH = 1 / timeHorizon;
+    for (const { a: other, resp } of neigh) {
+      const rp = sub(other.pos, pos), rv = sub(vel, other.vel);
+      const dsq = absSq(rp), cr = R + other.radius, crSq = cr * cr;
+      let direction, u;
+      if (dsq > crSq) {
+        const w = sub(rv, mul(invTH, rp)), wl2 = absSq(w), dp1 = dot(w, rp);
+        if (dp1 < 0 && dp1 * dp1 > crSq * wl2) {
+          const wl = Math.sqrt(wl2), uw = mul(1 / wl, w);
+          direction = V(uw.y, -uw.x); u = mul(cr * invTH - wl, uw);
+        } else {
+          const leg = Math.sqrt(dsq - crSq);
+          if (det(rp, w) > 0) direction = mul(1 / dsq, V(rp.x * leg - rp.y * cr, rp.x * cr + rp.y * leg));
+          else direction = mul(-1 / dsq, V(rp.x * leg + rp.y * cr, -rp.x * cr + rp.y * leg));
+          u = sub(mul(dot(rv, direction), direction), rv);
+        }
+      } else {
+        stat.orcaInside++;
+        const invTS = 1 / DT, w = sub(rv, mul(invTS, rp)), wl = abs(w) || EPS, uw = mul(1 / wl, w);
+        direction = V(uw.y, -uw.x); u = mul(cr * invTS - wl, uw);
+      }
+      lines.push({ direction, point: add(vel, mul(resp, u)) });
+    }
+    const res = V(0, 0);
+    const fail = linearProgram2(lines, ag.maxSpeed, ag.prefVel, false, res);
+    if (fail < lines.length) { stat.lp3++; linearProgram3(lines, numObst, fail, ag.maxSpeed, res); }
+    return res;
+  }
+
+  // RVO2 Simulator.AddObstacle: vertices in counter-clockwise order (positive signed area in these raw coords)
+  function makeObstacle(verts, list) {
+    const first = list.length, n = verts.length;
+    for (let i = 0; i < n; i++) {
+      const ob = { point: verts[i], prev: null, next: null, direction: norm(sub(verts[(i + 1) % n], verts[i])),
+        convex: n === 2 ? true : leftOf(verts[(i - 1 + n) % n], verts[i], verts[(i + 1) % n]) >= 0 };
+      if (i) { ob.prev = list[list.length - 1]; ob.prev.next = ob; }
+      list.push(ob);
+    }
+    list[list.length - 1].next = list[first]; list[first].prev = list[list.length - 1];
+  }
+
+  // ---------- QuadTree (LeagueSandbox QuadTree.cs: deepest quadrant that fully contains the circle) ----------
+  class Quad { constructor(x, y, w, h, d) { this.x = x; this.y = y; this.w = w; this.h = h; this.depth = d; this.items = []; this.ch = [null, null, null, null]; } }
+  function buildTree(units, radiusOf) {
+    const root = new Quad(0, 0, W, H, 0), list = [root];
+    for (const u of units) {
+      const r = Math.max(0.5, radiusOf(u));
+      let q = root;
+      for (;;) {
+        const w = q.w / 2, h = q.h / 2;
+        if (w < 1 || h < 1) break;
+        let idx = -1;
+        for (let i = 0; i < 4; i++) {
+          const qx = q.x + (i & 1) * w, qy = q.y + (i >> 1) * h;
+          if (u.x - r >= qx && u.x + r <= qx + w && u.y - r >= qy && u.y + r <= qy + h) { idx = i; break; }
+        }
+        if (idx < 0) break;
+        if (!q.ch[idx]) { q.ch[idx] = new Quad(q.x + (idx & 1) * w, q.y + (idx >> 1) * h, w, h, q.depth + 1); list.push(q.ch[idx]); }
+        q = q.ch[idx];
+      }
+      q.items.push({ u, x: u.x, y: u.y, r });
+      u.node = q;
+    }
+    return { root, list };
+  }
+  function query(tree, cx, cy, r, out, stat) {
+    const stack = [tree.root];
+    while (stack.length) {
+      const q = stack.pop();
+      const nx = Math.max(q.x, Math.min(cx, q.x + q.w)), ny = Math.max(q.y, Math.min(cy, q.y + q.h));
+      if ((nx - cx) ** 2 + (ny - cy) ** 2 > r * r) continue;
+      for (const it of q.items) { stat.tests++; if ((it.x - cx) ** 2 + (it.y - cy) ** 2 < (it.r + r) ** 2) out.push(it.u); }
+      for (const c of q.ch) if (c) stack.push(c);
+    }
+  }
+
+  // ---------- terrain ----------
+  let walls = new Uint8Array(GW * GH), wallRects = [], obstacles = [];
+  const blocked = (x, y) => { const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL); return cx < 0 || cy < 0 || cx >= GW || cy >= GH || walls[cy * GW + cx] === 1; };
+  const DIRS = Array.from({ length: 8 }, (_, i) => [Math.cos(i * Math.PI / 4), Math.sin(i * Math.PI / 4)]);
+  const isWalkable = (x, y, r = 0) => { if (blocked(x, y)) return false; if (r > 0) for (const [dx, dy] of DIRS) if (blocked(x + dx * r, y + dy * r)) return false; return true; };
+  const closestExit = (x, y, r) => {
+    const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+    for (let ring = 0; ring < 40; ring++) {
+      let best = null, bd = Infinity;
+      for (let gy = cy - ring; gy <= cy + ring; gy++) for (let gx = cx - ring; gx <= cx + ring; gx++) {
+        if (Math.max(Math.abs(gx - cx), Math.abs(gy - cy)) !== ring) continue;
+        const px = gx * CELL + CELL / 2, py = gy * CELL + CELL / 2;
+        if (!isWalkable(px, py, r)) continue;
+        const d = (px - x) ** 2 + (py - y) ** 2;
+        if (d < bd) { bd = d; best = { x: px, y: py }; }
+      }
+      if (best) return best;
+    }
+    return { x, y };
+  };
+  function setWalls(rects) {
+    walls = new Uint8Array(GW * GH); wallRects = rects; obstacles = [];
+    for (const [cx0, cy0, cx1, cy1] of rects) {
+      for (let gy = cy0; gy < cy1; gy++) for (let gx = cx0; gx < cx1; gx++) walls[gy * GW + gx] = 1;
+      const x0 = cx0 * CELL, y0 = cy0 * CELL, x1 = cx1 * CELL, y1 = cy1 * CELL;
+      makeObstacle([V(x0, y0), V(x1, y0), V(x1, y1), V(x0, y1)], obstacles);
+    }
+  }
+
+  // ---------- scenarios (shared spec for both maps) ----------
+  const TYPES = {
+    minion: { collR: 48, pathR: 35.7437, speed: 325, label: "미니언" },
+    champ: { collR: 55, pathR: 30, speed: 335, label: "챔피언(애니)" },
+  };
+  let seed = 1;
+  const rng = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+  const SCEN = {
+    crowd() {
+      seed = 7; const out = [];
+      for (let i = 0; i < 26; i++) {
+        const a = rng() * Math.PI * 2, d = 450 + rng() * 300;
+        out.push({ type: i % 6 === 0 ? "champ" : "minion", team: i % 2 ? "red" : "blue", x: W / 2 + Math.cos(a) * d * 1.4, y: H / 2 + Math.sin(a) * d, path: [{ x: W / 2, y: H / 2 }] });
+      }
+      return { units: out, walls: [] };
+    },
+    waves() {
+      const out = [];
+      for (let i = 0; i < 6; i++) {
+        const row = i % 3, col = Math.floor(i / 3);
+        out.push({ type: "minion", team: "blue", x: 300 - col * 90, y: 680 + row * 120, path: [{ x: 2150, y: 680 + row * 120 }] });
+        out.push({ type: "minion", team: "red", x: 2100 + col * 90, y: 700 + row * 120, path: [{ x: 250, y: 700 + row * 120 }] });
+      }
+      return { units: out, walls: [] };
+    },
+    choke() {
+      seed = 3; const out = [];
+      for (let i = 0; i < 14; i++) {
+        out.push({ type: "minion", team: "blue", x: 300 + (i % 4) * 110 + rng() * 20, y: 520 + Math.floor(i / 4) * 130 + rng() * 20, path: [{ x: 1250, y: 800 }, { x: 2050, y: 800 }] });
+      }
+      return { units: out, walls: [[24, 0, 26, 15], [24, 17, 26, GH]] };
+    },
+    idle() {
+      const out = [];
+      for (let gy = 0; gy < 4; gy++) for (let gx = 0; gx < 5; gx++) out.push({ type: "minion", team: "red", x: 1100 + gx * 75, y: 690 + gy * 75, path: [] });
+      out.push({ type: "champ", team: "blue", x: 400, y: 800, path: [{ x: 2100, y: 800 }] });
+      return { units: out, walls: [] };
+    },
+  };
+
+  const MODES = {
+    server: { label: "서버 원본", hint: "감지 CollisionRadius, 밀어내기 PathfindingRadius+1, 즉시 순간이동. 현재 서버 코드와 같습니다." },
+    unified: { label: "반경 통일", hint: "감지도 PathfindingRadius로 맞춘 버전. 끌어당김은 없지만 여전히 순간이동합니다." },
+    soft: { label: "부드러운 밀어내기", hint: "겹친 깊이의 15%만 매 틱 밀어냅니다. 위치 보정 방식을 유지하면서 떨림을 줄이는 최소 수정안." },
+    orca: { label: "ORCA", hint: "RVO2 ORCA로 속도를 골라 미리 피합니다. 위치를 직접 고치는 것은 유닛 중심이 벽에 들어간 경우뿐입니다." },
+    off: { label: "끄기", hint: "유닛끼리 충돌을 처리하지 않습니다. 지형 충돌만 남습니다." },
+  };
+
+  let selectedId = null, marker = null;
+
+  // ---------- one map ----------
+  class Sim {
+    constructor(el, mode) {
+      this.el = el; this.mode = mode;
+      el.innerHTML = `<div class="simhead"><div class="modes">${Object.entries(MODES).map(([k, m]) => `<button data-m="${k}">${m.label}</button>`).join("")}</div></div>
+        <div class="modehint"></div><canvas aria-label="충돌 시뮬레이션 맵"></canvas><div class="metrics"></div>`;
+      this.cv = el.querySelector("canvas"); this.ctx = this.cv.getContext("2d");
+      this.$hint = el.querySelector(".modehint"); this.$m = el.querySelector(".metrics");
+      el.querySelector(".modes").addEventListener("click", e => { const b = e.target.closest("button"); if (b) this.setMode(b.dataset.m); });
+      this.cv.addEventListener("pointerdown", e => onMapClick(this, e));
+      this.setMode(mode);
+    }
+    setMode(m) {
+      this.mode = m;
+      this.el.querySelectorAll(".modes button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.m === m)));
+      this.$hint.textContent = MODES[m].hint;
+      this.tree = buildTree(this.units || [], u => this.detectR(u)); this.hist = [];
+    }
+    detectR(u) { return this.mode === "server" ? u.collR : u.pathR; }
+    load(spec) {
+      this.units = spec.map((s, i) => this.mk(s, i + 1));
+      this.tick = 0; this.hist = [];
+      this.tree = buildTree(this.units, u => this.detectR(u));
+    }
+    mk(s, id) {
+      const t = TYPES[s.type];
+      return { id, type: s.type, team: s.team, x: s.x, y: s.y, collR: t.collR, pathR: t.pathR, speed: t.speed, path: s.path.map(p => ({ ...p })),
+        vx: 0, vy: 0, pushX: 0, pushY: 0, pull: false, stuck: false, lastGoal: null, node: null, cands: null };
+    }
+    prefVelocity(u) {
+      if (!u.path.length) return V(0, 0);
+      const p = u.path[0], dx = p.x - u.x, dy = p.y - u.y, d = Math.hypot(dx, dy);
+      if (d < 1e-6) return V(0, 0);
+      const sp = Math.min(u.speed, d / DT);
+      return V(dx / d * sp, dy / d * sp);
+    }
+    advanceWaypoints(u) {
+      while (u.path.length) {
+        const p = u.path[0], d = Math.hypot(p.x - u.x, p.y - u.y);
+        const tol = u.path.length > 1 ? 60 : 1;
+        if (d <= tol) u.path.shift(); else break;
+      }
+    }
+    step() {
+      const t0 = performance.now();
+      this.tick++;
+      const s = { tests: 0, pushes: 0, pulls: 0, teleSum: 0, terrain: 0, lp3: 0, orcaInside: 0, n: this.units.length };
+      for (const u of this.units) { u.pushX = 0; u.pushY = 0; u.pull = false; u.cands = null; u.px = u.x; u.py = u.y; }
+
+      // Map.Update -> CollisionHandler.Update (terrain + unit collision), then UpdateQuadTree
+      for (const u of this.units) {
+        if (!isWalkable(u.x, u.y, 0)) {
+          const e = closestExit(u.x, u.y, u.pathR + 1);
+          s.teleSum += Math.hypot(e.x - u.x, e.y - u.y); u.pushX += e.x - u.x; u.pushY += e.y - u.y; u.x = e.x; u.y = e.y; s.terrain++;
+        }
+        if (this.mode === "off" || this.mode === "orca") continue;
+        const cands = [];
+        query(this.tree, u.x, u.y, Math.max(0.5, this.detectR(u)), cands, s);
+        if (u.id === selectedId) u.cands = cands.slice();
+        for (const o of cands) {
+          if (o === u) continue;
+          const rr = this.detectR(u) + this.detectR(o);
+          const dx = o.x - u.x, dy = o.y - u.y, d2 = dx * dx + dy * dy;
+          if (d2 >= rr * rr) continue;
+          let d = Math.sqrt(d2), ux, uy;
+          if (d < 1e-6) { const a = rng() * Math.PI * 2; ux = Math.cos(a); uy = Math.sin(a); d = 0; } else { ux = dx / d; uy = dy / d; }
+          let ex, ey;
+          if (this.mode === "soft") {
+            const pen = u.pathR + o.pathR - d;
+            ex = u.x - ux * pen * 0.15; ey = u.y - uy * pen * 0.15;
+            if (!isWalkable(ex, ey, 0)) continue;
+          } else {
+            const target = u.pathR + 1 + o.pathR;
+            ex = u.x + ux * (d - target); ey = u.y + uy * (d - target);
+            if (!isWalkable(ex, ey, u.pathR)) { const e = closestExit(ex, ey, u.pathR + 1); ex = e.x; ey = e.y; }
+            if (d > target) { s.pulls++; u.pull = true; }
+          }
+          const mx = ex - u.x, my = ey - u.y;
+          s.pushes++; s.teleSum += Math.hypot(mx, my);
+          u.pushX += mx; u.pushY += my; u.x = ex; u.y = ey;
+        }
+      }
+
+      if (this.mode === "orca") {
+        // ORCA: neighbours from the QuadTree, then compute all new velocities before applying any (like Simulator.DoStep)
+        const agents = new Map();
+        for (const u of this.units) {
+          const fixed = opts.fixIdle && !u.path.length;
+          agents.set(u, { pos: V(u.x, u.y), vel: fixed ? V(0, 0) : V(u.vx, u.vy), prefVel: this.prefVelocity(u), radius: u.pathR, maxSpeed: u.speed, fixed });
+        }
+        const newVel = new Map();
+        for (const u of this.units) {
+          const ag = agents.get(u);
+          if (ag.fixed) { newVel.set(u, V(0, 0)); continue; }
+          const cands = [];
+          query(this.tree, u.x, u.y, ORCA_NEIGHBOR_DIST, cands, s);
+          if (u.id === selectedId) u.cands = cands.slice();
+          const neigh = [];
+          for (const o of cands) { if (o === u) continue; const d2 = (o.x - u.x) ** 2 + (o.y - u.y) ** 2; if (d2 < ORCA_NEIGHBOR_DIST ** 2) neigh.push([d2, o]); }
+          neigh.sort((a, b) => a[0] - b[0]);
+          const nb = neigh.slice(0, ORCA_MAX_NEIGHBORS).map(([, o]) => { const oa = agents.get(o); return { a: oa, resp: oa.fixed ? 1 : 0.5 }; });
+          const range = ORCA_TH_OBST * u.speed + u.pathR, rangeSq = range * range;
+          const obst = [];
+          for (const ob of obstacles) {
+            if (leftOf(ob.point, ob.next.point, ag.pos) >= 0) continue; // agent must be on the right (outer) side
+            const dsq = distSqPointSeg(ob.point, ob.next.point, ag.pos);
+            if (dsq < rangeSq) obst.push([dsq, ob]);
+          }
+          obst.sort((a, b) => a[0] - b[0]);
+          newVel.set(u, computeOrcaVelocity(ag, nb, obst.map(o => o[1]), opts.timeHorizon, s));
+        }
+        for (const u of this.units) {
+          let v = newVel.get(u); const sp = abs(v);
+          if (sp > u.speed) v = mul(u.speed / sp, v);
+          u.vx = v.x; u.vy = v.y;
+        }
+      }
+
+      this.tree = buildTree(this.units, u => this.mode === "orca" ? u.pathR : this.detectR(u));
+
+      // ObjectManager.Update -> unit movement
+      for (const u of this.units) {
+        const bx = u.x, by = u.y;
+        if (this.mode === "orca") {
+          u.x += u.vx * DT; u.y += u.vy * DT;
+          this.advanceWaypoints(u);
+        } else {
+          let budget = u.speed * DT;
+          while (budget > 0 && u.path.length) {
+            const p = u.path[0], dx = p.x - u.x, dy = p.y - u.y, d = Math.hypot(dx, dy);
+            if (d <= budget) { u.x = p.x; u.y = p.y; budget -= d; u.path.shift(); }
+            else { u.x += dx / d * budget; u.y += dy / d * budget; budget = 0; }
+          }
+        }
+        if (this.mode !== "orca") { u.vx = (u.x - bx) / DT; u.vy = (u.y - by) / DT; }
+      }
+
+      if (this.tick % 60 === 0) for (const u of this.units) {
+        if (!u.path.length) { u.stuck = false; u.lastGoal = null; continue; }
+        const g = u.path[u.path.length - 1], cur = Math.hypot(g.x - u.x, g.y - u.y);
+        if (u.lastGoal !== null) u.stuck = (u.lastGoal - cur) < u.speed * 0.25;
+        u.lastGoal = cur;
+      }
+
+      let overlaps = 0, maxDepth = 0, moving = 0, speedRatio = 0;
+      for (let i = 0; i < this.units.length; i++) {
+        const a = this.units[i];
+        if (a.path.length) { moving++; speedRatio += Math.hypot(a.x - a.px, a.y - a.py) / (a.speed * DT); }
+        for (let j = i + 1; j < this.units.length; j++) {
+          const b = this.units[j], pen = a.pathR + b.pathR - Math.hypot(a.x - b.x, a.y - b.y);
+          if (pen > 0.5) { overlaps++; if (pen > maxDepth) maxDepth = pen; }
+        }
+      }
+      s.overlaps = overlaps; s.maxDepth = maxDepth; s.stuck = this.units.filter(u => u.stuck).length;
+      s.moving = moving; s.speedRatio = moving ? speedRatio / moving : 0;
+      s.ms = performance.now() - t0;
+      this.hist.push(s); if (this.hist.length > 60) this.hist.shift();
+    }
+
+    resize(dpr) { const w = this.cv.clientWidth; this.scale = w / W; this.dpr = dpr; this.cv.width = Math.round(w * dpr); this.cv.height = Math.round(w * (H / W) * dpr); }
+
+    draw(c) {
+      const ctx = this.ctx, sc = this.scale, k = sc * this.dpr, on = id => document.getElementById(id).checked;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = c.ground; ctx.fillRect(0, 0, this.cv.width, this.cv.height);
+      ctx.setTransform(k, 0, 0, k, 0, 0);
+      ctx.fillStyle = c.wall;
+      for (const [x0, y0, x1, y1] of wallRects) ctx.fillRect(x0 * CELL, y0 * CELL, (x1 - x0) * CELL, (y1 - y0) * CELL);
+
+      if (on("showQuad")) {
+        ctx.strokeStyle = c.quad; ctx.lineWidth = 1 / k;
+        for (const q of this.tree.list) ctx.strokeRect(q.x, q.y, q.w, q.h);
+        ctx.fillStyle = c.muted; ctx.font = `${11 / sc}px JetBrains Mono, monospace`; ctx.textBaseline = "top";
+        for (const q of this.tree.list) if (q.items.length && q.w * sc > 22) ctx.fillText(String(q.items.length), q.x + 4 / sc, q.y + 3 / sc);
+      }
+      if (marker && performance.now() - marker.t < 900) {
+        const a = 1 - (performance.now() - marker.t) / 900;
+        ctx.globalAlpha = a; ctx.strokeStyle = c.sel; ctx.lineWidth = 2 / sc;
+        ctx.beginPath(); ctx.arc(marker.x, marker.y, 30 + (1 - a) * 30, 0, Math.PI * 2); ctx.stroke(); ctx.globalAlpha = 1;
+      }
+      if (on("showPath")) {
+        ctx.strokeStyle = c.muted; ctx.lineWidth = 1 / sc; ctx.setLineDash([6 / sc, 6 / sc]);
+        for (const u of this.units) if (u.path.length) { ctx.beginPath(); ctx.moveTo(u.x, u.y); for (const p of u.path) ctx.lineTo(p.x, p.y); ctx.stroke(); }
+        ctx.setLineDash([]);
+      }
+      const sel = this.units.find(u => u.id === selectedId);
+      if (sel) {
+        const r = this.mode === "orca" ? ORCA_NEIGHBOR_DIST : this.detectR(sel);
+        ctx.fillStyle = c.sel; ctx.globalAlpha = 0.08; ctx.beginPath(); ctx.arc(sel.x, sel.y, r, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
+        if (sel.node) { ctx.strokeStyle = c.sel; ctx.lineWidth = 2 / sc; ctx.strokeRect(sel.node.x, sel.node.y, sel.node.w, sel.node.h); }
+        if (sel.cands) { ctx.strokeStyle = c.sel; ctx.lineWidth = 1.2 / sc; for (const o of sel.cands) if (o !== sel) { ctx.beginPath(); ctx.moveTo(sel.x, sel.y); ctx.lineTo(o.x, o.y); ctx.stroke(); } }
+      }
+      for (const u of this.units) {
+        const col = u.team === "blue" ? c.blue : c.red;
+        if (on("showRing") && this.mode !== "off") {
+          const rr = this.mode === "server" ? u.collR : u.pathR + (this.mode === "orca" ? 0 : 0);
+          ctx.strokeStyle = col; ctx.globalAlpha = 0.5; ctx.lineWidth = 1 / sc; ctx.setLineDash([5 / sc, 4 / sc]);
+          ctx.beginPath(); ctx.arc(u.x, u.y, rr + (this.mode === "server" ? 0 : 3), 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+        }
+        ctx.fillStyle = col; ctx.globalAlpha = 0.85; ctx.beginPath(); ctx.arc(u.x, u.y, u.pathR, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
+        if (u.type === "champ") { ctx.strokeStyle = c.fg; ctx.lineWidth = 2.5 / sc; ctx.stroke(); }
+        if (u.id === selectedId) { ctx.strokeStyle = c.sel; ctx.lineWidth = 3 / sc; ctx.beginPath(); ctx.arc(u.x, u.y, u.pathR + 7, 0, Math.PI * 2); ctx.stroke(); }
+        if (u.stuck) { ctx.strokeStyle = c.accent; ctx.lineWidth = 2 / sc; ctx.setLineDash([3 / sc, 3 / sc]); ctx.beginPath(); ctx.arc(u.x, u.y, u.pathR + 13, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); }
+      }
+      ctx.lineCap = "round";
+      if (on("showVel")) {
+        ctx.strokeStyle = c.vel; ctx.lineWidth = 2 / sc;
+        for (const u of this.units) { if (Math.hypot(u.vx, u.vy) < 5) continue; ctx.beginPath(); ctx.moveTo(u.x, u.y); ctx.lineTo(u.x + u.vx * 0.25, u.y + u.vy * 0.25); ctx.stroke(); }
+      }
+      if (on("showPush")) {
+        ctx.lineWidth = 3.5 / sc;
+        for (const u of this.units) { const m = Math.hypot(u.pushX, u.pushY); if (m < 0.05) continue;
+          ctx.strokeStyle = u.pull ? c.pull : c.accent; ctx.beginPath(); ctx.moveTo(u.x, u.y); ctx.lineTo(u.x + u.pushX * 8, u.y + u.pushY * 8); ctx.stroke(); }
+      }
+    }
+
+    renderMetrics() {
+      const h = this.hist, n = h.length || 1, avg = f => h.reduce((a, s) => a + f(s), 0) / n;
+      const last = h[h.length - 1] || { n: this.units.length, overlaps: 0, maxDepth: 0, stuck: 0, moving: 0 };
+      const tele = avg(s => s.teleSum) / Math.max(1, last.n), pulls = h.reduce((a, s) => a + s.pulls, 0);
+      const ratio = avg(s => s.speedRatio) * 100, ms = avg(s => s.ms);
+      const rows = [
+        ["틱 처리 시간", ms.toFixed(3) + " ms", ""],
+        ["틱당 거리 검사", avg(s => s.tests).toFixed(0), ""],
+        ["유닛당 틱 순간이동", tele.toFixed(2), tele > 1.5 ? "bad" : tele > 0.3 ? "warn" : "good"],
+        ["초당 끌어당김", pulls, pulls ? "bad" : ""],
+        ["몸체 겹침 쌍", last.overlaps, last.overlaps > 3 ? "warn" : ""],
+        ["최대 겹침 깊이", last.maxDepth.toFixed(1), last.maxDepth > 20 ? "bad" : last.maxDepth > 5 ? "warn" : ""],
+        ["이동 중 속도 효율", last.moving ? ratio.toFixed(0) + "%" : "-", ""],
+        ["정체 유닛", last.stuck + " / " + last.moving, last.stuck ? "warn" : ""],
+      ];
+      if (this.mode === "orca") rows.push(["LP3 대체 해 (초당)", h.reduce((a, s) => a + s.lp3, 0), ""], ["겹친 상태 ORCA 계산 (초당)", h.reduce((a, s) => a + s.orcaInside, 0), ""]);
+      this.$m.innerHTML = rows.map(([k, v, cl]) => `<div><span>${k}</span><span class="${cl}">${v}</span></div>`).join("");
+    }
+  }
+
+  const sims = [new Sim(document.getElementById("simA"), "server"), new Sim(document.getElementById("simB"), "orca")];
+  let scenario = "crowd", extraSpecs = [];
+
+  function reset() {
+    selectedId = null; marker = null; extraSpecs = [];
+    const spec = SCEN[scenario]();
+    setWalls(spec.walls);
+    for (const s of sims) { s.load(spec.units); for (const u of s.units) { u.vx = 0; u.vy = 0; } }
+  }
+
+  function onMapClick(sim, e) {
+    const r = sim.cv.getBoundingClientRect(), x = (e.clientX - r.left) / sim.scale, y = (e.clientY - r.top) / sim.scale;
+    const hit = sim.units.find(u => Math.hypot(u.x - x, u.y - y) < u.pathR + 10 / sim.scale);
+    if (hit) { selectedId = selectedId === hit.id ? null : hit.id; return; }
+    marker = { x, y, t: performance.now() };
+    for (const s of sims) for (const u of s.units) if (selectedId === null || u.id === selectedId) { u.path = [{ x, y }]; u.lastGoal = null; u.stuck = false; }
+  }
+
+  // ---------- controls ----------
+  let playing = true, acc = 0, lastT = performance.now(), lastPanel = 0;
+  document.getElementById("scen").addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    scenario = b.dataset.s; e.currentTarget.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b))); reset();
+  });
+  const $play = document.getElementById("play");
+  $play.addEventListener("click", () => { playing = !playing; $play.textContent = playing ? "일시정지" : "재생"; $play.setAttribute("aria-pressed", String(playing)); });
+  document.getElementById("step").addEventListener("click", () => { for (const s of sims) s.step(); });
+  document.getElementById("reset").addEventListener("click", reset);
+  document.getElementById("add").addEventListener("click", () => {
+    seed = (Date.now() % 100000) + 11;
+    const specs = [];
+    for (let i = 0; i < 5; i++) {
+      let x, y, t = 0; do { x = 100 + rng() * (W - 200); y = 100 + rng() * (H - 200); } while (!isWalkable(x, y, 40) && ++t < 50);
+      specs.push({ type: "minion", team: rng() < 0.5 ? "blue" : "red", x, y, path: [] });
+    }
+    for (const s of sims) { const base = s.units.reduce((m, u) => Math.max(m, u.id), 0); specs.forEach((sp, i) => s.units.push(s.mk(sp, base + i + 1))); }
+  });
+  const $th = document.getElementById("th"), $thv = document.getElementById("thv");
+  $th.addEventListener("input", () => { opts.timeHorizon = Number($th.value); $thv.textContent = opts.timeHorizon.toFixed(2) + "s"; });
+  document.getElementById("fixIdle").addEventListener("change", e => { opts.fixIdle = e.target.checked; });
+
+  const css = () => { const g = getComputedStyle(document.documentElement), v = n => g.getPropertyValue(n).trim();
+    return { ground: v("--ground"), wall: v("--wall"), blue: v("--blue"), red: v("--red"), accent: v("--accent"), pull: v("--pull"), vel: v("--vel"), quad: v("--quad"), fg: v("--fg"), muted: v("--muted"), sel: v("--sel") }; };
+  const resize = () => { const dpr = Math.min(2, window.devicePixelRatio || 1); for (const s of sims) s.resize(dpr); };
+  window.addEventListener("resize", resize);
+
+  function frame(t) {
+    const real = Math.min(0.1, (t - lastT) / 1000); lastT = t;
+    if (playing) {
+      acc += real * Number(document.getElementById("speed").value);
+      let guard = 0;
+      while (acc >= DT && guard++ < 8) { for (const s of sims) s.step(); acc -= DT; }
+      if (guard >= 8) acc = 0;
+    }
+    const c = css();
+    for (const s of sims) s.draw(c);
+    if (t - lastPanel > 250) { for (const s of sims) s.renderMetrics(); lastPanel = t; }
+    requestAnimationFrame(frame);
+  }
+
+  resize(); reset(); for (const s of sims) s.renderMetrics();
+  requestAnimationFrame(frame);
+})();
+</script>
